@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>AeroDrop Proof of Concept</title>
+  <style>
+    body {
+      margin: 0;
+      padding-bottom: 3rem;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    .container {
+      margin: 1rem auto;
+      max-width: 800px;
+    }
+
+    #peers {
+      display: flex;
+      margin: 2rem 0;
+      padding: 2rem;
+      max-width: 800px;
+      background: rgba(0, 0, 0, 0.15);
+      border-radius: 1rem;
+    }
+
+    #peers .peer {
+      margin: 0.5rem;
+      padding: 1rem;
+      background: white;
+      border: 2px solid gold;
+      border-radius: 0.5rem;
+      cursor: pointer;
+      transition: transform 0.3s;
+    }
+
+    #peers .peer.self {
+      cursor: default;
+    }
+
+    #peers .peer:hover:not(.self) {
+      transform: translate(0, -5px);
+    }
+
+    #peers .peer:nth-child(2) {
+      border-color: greenyellow;
+    }
+
+    #peers .peer:nth-child(3) {
+      border-color: blueviolet;
+    }
+
+    #peers .peer:nth-child(4) {
+      border-color: aquamarine;
+    }
+
+    .signal {
+      margin: 1rem 0;
+      padding: 1rem;
+      border: 1px solid gainsboro;
+      border-radius: 1rem;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="container">
+    <div id="peers">
+    </div>
+
+    <div class="signal" id="offer"></div>
+    <div class="signal" id="answer"></div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script>
+    var socket = io();
+    var peerConnection
+
+    var elPeers = document.getElementById('peers');
+    var elOffer = document.getElementById('offer');
+    var elAnswer = document.getElementById('answer');
+
+    //
+    socket.on('user-list', function (ids) {
+      while (elPeers.firstChild) {
+        elPeers.removeChild(elPeers.firstChild);
+      }
+      ids.forEach(addPeer);
+    });
+
+    socket.on('user-add', function (id) {
+      addPeer(id);
+    });
+
+    socket.on('user-remove', function (id) {
+      var peer = document.getElementById(id);
+      if (peer && peer.parentNode) peer.parentNode.removeChild(peer);
+    });
+
+    function addPeer(id) {
+      console.log('add peer', id)
+      var peer = document.createElement('div');
+      peer.className = 'peer'
+      peer.textContent = id;
+      peer.id = id;
+      if (id !== socket.id) {
+        peer.addEventListener('click', () => connectToPeer(id))
+      } else {
+        peer.textContent += ' (me)';
+        peer.className += ' self';
+      }
+      elPeers.appendChild(peer);
+    }
+
+    socket.on('signal', signal => {
+      try {
+        signal = JSON.parse(signal)
+      } catch (err) {
+        displayError('Invalid signalling message', err, signal)
+        return
+      }
+
+      if (signal.type === 'peer-offer') {
+        handlePeerOffer(signal)
+      } else if (signal.type === 'peer-answer') {
+        handlePeerAnswer(signal)
+      } else {
+        displayError(`Invalid signal type "${signal.type}"`, signal)
+      }
+    })
+    socket.on('signal-error', err => {
+      displayError('Signalling Error', err)
+    })
+
+    function emitSignal(to, type, data) {
+      socket.emit('signal', {
+        id: to,
+        signal: JSON.stringify({ from: socket.id, type, data })
+      })
+    }
+
+    function createPeerConnection() {
+      peerConnection = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.stunprotocol.org", }]
+      })
+      peerConnection.addEventListener('icecandidate', (pc, ev) => {
+        console.log('PEER icecandidate', ev)
+      })
+      peerConnection.addEventListener('track', (pc, ev) => {
+        console.log('PEER track', ev)
+      })
+      peerConnection.addEventListener('negotiationneeded', (pc, ev) => {
+        console.log('PEER negotiationneeded', ev)
+      })
+      peerConnection.addEventListener('removetrack', (pc, ev) => {
+        console.log('PEER removetrack', ev)
+      })
+      peerConnection.addEventListener('iceconnectionstatechange', (pc, ev) => {
+        console.log('PEER iceconnectionstatechange', ev)
+      })
+      peerConnection.addEventListener('icegatheringstatechange', (pc, ev) => {
+        console.log('PEER icegatheringstatechange', ev)
+      })
+      peerConnection.addEventListener('signalingstatechange', (pc, ev) => {
+        console.log('PEER signalingstatechange', ev)
+      })
+
+    }
+
+    function connectToPeer(target) {
+      console.log('connecting to target', target)
+
+      createPeerConnection()
+      peerConnection
+        .createOffer()
+        .then(offer => {
+          elOffer.innerText = JSON.stringify(offer, null, 2)
+          return peerConnection.setLocalDescription(offer)
+        }).then(() => {
+          emitSignal(target, 'peer-offer', peerConnection.localDescription)
+        })
+        .catch(err => displayError('Error creating peering offer', err))
+    }
+
+    function handlePeerOffer(signal) {
+      const partnerId = signal.from
+      console.log('received offer from', partnerId)
+      elOffer.innerText = JSON.stringify(signal.data, null, 2)
+
+      createPeerConnection()
+      const descr = new RTCSessionDescription(signal.data)
+      peerConnection
+        .setRemoteDescription(descr)
+        .then(() => peerConnection.createAnswer())
+        .then(answer => {
+          elAnswer.innerText = JSON.stringify(answer, null, 2)
+          return peerConnection.setLocalDescription(answer)
+        }).then(() => {
+          emitSignal(partnerId, 'peer-answer', peerConnection.localDescription)
+        })
+        .catch(err => displayError('Error creating peering answer', err))
+    }
+
+    function handlePeerAnswer(signal) {
+      elAnswer.innerText = JSON.stringify(signal.data, null, 2)
+    }
+
+    function displayError(msg, err, ...args) {
+      alert(msg)
+      console.error(msg, err, ...args)
+    }
+  </script>
+</body>
+
+</html>
